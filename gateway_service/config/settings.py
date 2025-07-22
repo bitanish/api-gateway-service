@@ -146,3 +146,12 @@ CACHES = {
         }
     }
 }
+
+RATE_LIMITS = {
+    "default_tokens": 100,
+    "default_refill_rate": 1,
+    "paths": {
+        "/api/user": {"tokens": 30, "refill_rate": 1},
+        "/api/test": {"tokens": 50, "refill_rate": 2},
+    },
+}

@@ -1,42 +1,55 @@
-import time
+import time, math
 from django.http import JsonResponse
 from django.core.cache import cache
 from rest_framework_simplejwt.authentication import JWTAuthentication
+from django.conf import settings
 
 class TokenBucketRateLimitMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
-
-        # Rate limit policy
-        self.capacity = 10            # max requests
-        self.refill_rate = 1         # tokens per second (~60/min)
 
     def __call__(self, request):
         user = self._get_authenticated_user(request)
         if user is None:
             return self.get_response(request)
 
-        user_key = f"rate-limit:{user.id}"
+        path = request.path
+        rate_config = settings.RATE_LIMITS
+        path_config = rate_config.get("paths", {}).get(path, {})
+
+        capacity = path_config.get("tokens", rate_config["default_tokens"])
+        refill_rate = path_config.get("refill_rate", rate_config["default_refill_rate"])
+
+        user_key = f"rate-limit:{user.id}:{path}"
         current_time = time.time()
 
-        # Get bucket from Redis
+        # Get token bucket from Redis
         bucket = cache.get(user_key)
         if bucket:
             tokens, last_time = bucket
         else:
-            tokens = self.capacity
+            tokens = capacity
             last_time = current_time
 
-        # Refill tokens
+        # Refill logic
         elapsed = current_time - last_time
-        refill = elapsed * self.refill_rate
-        tokens = min(self.capacity, tokens + refill)
+        refill = elapsed * refill_rate
+        tokens = min(capacity, tokens + refill)
         last_time = current_time
 
         if tokens >= 1:
             tokens -= 1
             cache.set(user_key, (tokens, last_time), timeout=60)
-            return self.get_response(request)
+
+            response = self.get_response(request)
+
+            # ✅ Add rate-limiting headers
+            response["X-RateLimit-Limit"] = str(capacity)
+            response["X-RateLimit-Remaining"] = str(math.floor(tokens))
+            time_until_reset = math.ceil((1 - tokens) / refill_rate) if tokens < 1 else 0
+            response["X-RateLimit-Reset"] = str(time_until_reset)
+
+            return response
         else:
             return JsonResponse(
                 {"detail": "Rate limit exceeded. Try again later."},
@@ -49,7 +62,6 @@ class TokenBucketRateLimitMiddleware:
             if user and user.is_authenticated:
                 return user
             else:
-                # Try authenticating manually if not already done
                 auth = JWTAuthentication()
                 validated = auth.authenticate(request)
                 if validated is not None:
